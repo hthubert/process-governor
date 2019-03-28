@@ -33,7 +33,7 @@ namespace LowLevelDesign
 
                 var procgov = new ProcessGovernor();
                 Program.LoadCustomEnvironmentVariables(procgov, envVarsFile);
-                Assert.Equal<KeyValuePair<string, string>>(new Dictionary<string, string>() {
+                Assert.Equal<KeyValuePair<string, string>>(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) {
                     { "TEST", "TESTVAL" },
                     { "TEST2", "TEST VAL2" }
                 }, procgov.AdditionalEnvironmentVars);
@@ -59,6 +59,17 @@ namespace LowLevelDesign
             Assert.Equal(2 * 1024u, Program.ParseMemoryString("2K"));
             Assert.Equal(3 * 1024u * 1024u, Program.ParseMemoryString("3M"));
             Assert.Equal(3 * 1024u * 1024u * 1024u, Program.ParseMemoryString("3G"));
+        }
+
+        [Fact]
+        public void ParseTimeStringToMillisecondsTest()
+        {
+            Assert.Equal(10u, Program.ParseTimeStringToMilliseconds("10"));
+            Assert.Equal(10u, Program.ParseTimeStringToMilliseconds("10ms"));
+            Assert.Equal(10000u, Program.ParseTimeStringToMilliseconds("10s"));
+            Assert.Equal(600000u, Program.ParseTimeStringToMilliseconds("10m"));
+            Assert.Equal(36000000u, Program.ParseTimeStringToMilliseconds("10h"));
+            Assert.Throws<FormatException>(() => Program.ParseTimeStringToMilliseconds("sdfms"));
         }
 
         [Fact]

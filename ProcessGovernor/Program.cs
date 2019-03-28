@@ -14,8 +14,10 @@ namespace LowLevelDesign
 {
     public static class Program
     {
-        public static void Main(string[] args)
+        public static int Main(string[] args)
         {
+            ShowHeader();
+
             using (var procgov = new ProcessGovernor()) {
                 List<string> procargs = null;
                 bool showhelp = false, nogui = false, debug = false;
@@ -36,16 +38,27 @@ namespace LowLevelDesign
                                 procgov.CpuAffinityMask = CalculateAffinityMaskFromCpuCount(int.Parse(v));
                             }
                         }},
+                    { "r|recursive", "Apply limits to child processes too (will wait for all processes to finish).", v => { procgov.PropagateOnChildProcesses = v != null;  } },
                     { "newconsole", "Start the process in a new console window.", v => { procgov.SpawnNewConsoleWindow = v != null; } },
                     { "nogui", "Hide Process Governor console window (set always when installed as debugger).",
                         v => { nogui = v != null; } },
                     { "p|pid=", "Attach to an already running process", (int v) => pid = v },
-                    { "install", "Installs procgov as a debugger for a specific process using Image File Executions.",
+                    { "install", "Install procgov as a debugger for a specific process using Image File Executions. " +
+                                 "DO NOT USE this option if the process you want to control starts child instances of itself (for example, Chrome).",
                         v => { registryOperation = RegistryOperation.INSTALL; } },
-                    { "uninstall", "Uninstalls procgov for a specific process.",
-                        v => { registryOperation = RegistryOperation.UNINSTALL; } },
+                    { "t|timeout=", "Kill the process (with -r, also all its children) if it does not finish within the specified time. " +
+                                    "Add suffix to define the time unit. Valid suffixes are: ms, s, m, h.",
+                        (string v) => procgov.ClockTimeLimitInMilliseconds = ParseTimeStringToMilliseconds(v) },
+                    { "process-utime=", "Kill the process (with -r, also applies to its children) if it exceeds the given " +
+                                    "user-mode execution time. Add suffix to define the time unit. Valid suffixes are: ms, s, m, h.",
+                        (string v) => procgov.ProcessUserTimeLimitInMilliseconds = ParseTimeStringToMilliseconds(v) },
+                    { "job-utime=", "Kill the process (with -r, also all its children) if the total user-mode execution " +
+                                   "time exceed the specified value. Add suffix to define the time unit. Valid suffixes are: ms, s, m, h.",
+                        (string v) => procgov.JobUserTimeLimitInMilliseconds = ParseTimeStringToMilliseconds(v) },
+                    { "uninstall", "Uninstall procgov for a specific process.", v => { registryOperation = RegistryOperation.UNINSTALL; } },
                     { "debugger", "Internal - do not use.",
-                        v => { debug = v != null; } },
+                        v => debug = v != null },
+                    { "v|verbose", "Show verbose messages in the console.", v => procgov.ShowTraceMessages = v != null },
                     { "h|help", "Show this message and exit", v => showhelp = v != null },
                     { "?", "Show this message and exit", v => showhelp = v != null }
                 };
@@ -53,38 +66,38 @@ namespace LowLevelDesign
                 try {
                     procargs = p.Parse(args);
                 } catch (OptionException ex) {
-                    Console.Write("ERROR: invalid argument");
-                    Console.WriteLine(ex.Message);
+                    Console.Error.Write("ERROR: invalid argument");
+                    Console.Error.WriteLine(ex.Message);
                     Console.WriteLine();
                     showhelp = true;
                 } catch (FormatException) {
-                    Console.WriteLine("ERROR: invalid number in one of the constraints");
+                    Console.Error.WriteLine("ERROR: invalid number in one of the constraints");
                     Console.WriteLine();
                     showhelp = true;
                 } catch (ArgumentException ex) {
-                    Console.WriteLine("ERROR: {0}", ex.Message);
+                    Console.Error.WriteLine("ERROR: {0}", ex.Message);
                     Console.WriteLine();
                     showhelp = true;
                 }
 
                 if (!showhelp && registryOperation != RegistryOperation.NONE) {
                     if (procargs.Count == 0) {
-                        Console.WriteLine("ERROR: please provide an image name for a process you would like to intercept.");
-                        return;
+                        Console.Error.WriteLine("ERROR: please provide an image name for a process you would like to intercept.");
+                        return 1;
                     }
                     SetupRegistryForProcessGovernor(procgov, procargs[0], registryOperation);
-                    return;
+                    return 0;
                 }
 
                 if (!showhelp && (procargs.Count == 0 && pid == 0) || (pid > 0 && procargs.Count > 0)) {
-                    Console.WriteLine("ERROR: please provide either process name or PID of the already running process");
+                    Console.Error.WriteLine("ERROR: please provide either process name or PID of the already running process");
                     Console.WriteLine();
                     showhelp = true;
                 }
 
                 if (showhelp) {
                     ShowHelp(p);
-                    return;
+                    return 0;
                 }
 
                 if (nogui) {
@@ -93,36 +106,67 @@ namespace LowLevelDesign
                 }
 
                 try {
+                    ShowLimits(procgov);
+
                     if (debug) {
-                        procgov.StartProcessUnderDebuggerAndDetach(procargs);
-                    } else if (pid > 0) {
-                        procgov.AttachToProcess(pid);
-                    } else {
-                        procgov.StartProcess(procargs);
+                        return procgov.StartProcessUnderDebuggerAndDetach(procargs);
                     }
+                    if (pid > 0) {
+                        return procgov.AttachToProcess(pid);
+                    } 
+                    return procgov.StartProcess(procargs);
                 } catch (Win32Exception ex) {
-                    Console.WriteLine("ERROR: {0} (0x{1:X})", ex.Message, ex.ErrorCode);
+                    Console.Error.WriteLine("ERROR: {0} (0x{1:X})", ex.Message, ex.ErrorCode);
+                    return 1;
                 } catch (Exception ex) {
-                    Console.WriteLine("ERROR: {0}", ex.Message);
+                    Console.Error.WriteLine("ERROR: {0}", ex.Message);
+                    return 1;
                 }
             }
         }
 
-        public static uint ParseMemoryString(string v)
+        public static uint ParseTimeStringToMilliseconds(string v)
+        {
+            if (v.EndsWith("ms", StringComparison.OrdinalIgnoreCase))
+            {
+                return uint.Parse(v.Substring(0, v.Length - 2));
+            }
+            if (v.EndsWith("s", StringComparison.OrdinalIgnoreCase))
+            {
+                return uint.Parse(v.Substring(0, v.Length - 1)) * 1000;
+            }
+            if (v.EndsWith("m", StringComparison.OrdinalIgnoreCase))
+            {
+                return uint.Parse(v.Substring(0, v.Length - 1)) * 1000 * 60;
+            }
+            if (v.EndsWith("h", StringComparison.OrdinalIgnoreCase))
+            {
+                return uint.Parse(v.Substring(0, v.Length - 1)) * 1000 * 60 * 60;
+            }
+            return uint.Parse(v);
+        }
+
+        public static ulong ParseMemoryString(string v)
         {
             if (v == null) {
                 return 0;
             }
+            ulong result;
             if (v.EndsWith("K", StringComparison.OrdinalIgnoreCase)) {
-                return uint.Parse(v.Substring(0, v.Length - 1)) << 10;
+                result = ulong.Parse(v.Substring(0, v.Length - 1)) << 10;
+            } else if (v.EndsWith("M", StringComparison.OrdinalIgnoreCase)) {
+                result = ulong.Parse(v.Substring(0, v.Length - 1)) << 20;
+            } else if (v.EndsWith("G", StringComparison.OrdinalIgnoreCase)) {
+                result = ulong.Parse(v.Substring(0, v.Length - 1)) << 30;
+            } else {
+                result = ulong.Parse(v);
             }
-            if (v.EndsWith("M", StringComparison.OrdinalIgnoreCase)) {
-                return uint.Parse(v.Substring(0, v.Length - 1)) << 20;
+            if (IntPtr.Size == 4 && result > uint.MaxValue)
+            {
+                // 32 bit
+                throw new ArgumentException("Memory limit is too high for 32-bit architecture.");
             }
-            if (v.EndsWith("G", StringComparison.OrdinalIgnoreCase)) {
-                return uint.Parse(v.Substring(0, v.Length - 1)) << 30;
-            }
-            return uint.Parse(v);
+            return result;
         }
 
         public static void LoadCustomEnvironmentVariables(ProcessGovernor procgov, string file)
@@ -153,12 +197,16 @@ namespace LowLevelDesign
             }
         }
 
+        static void ShowHeader()
+        {
+            Console.WriteLine("Process Governor v{0} - sets limits on your processes", 
+                Assembly.GetExecutingAssembly().GetName().Version.ToString());
+            Console.WriteLine("Copyright (C) 2019 Sebastian Solnica (lowleveldesign.org)");
+            Console.WriteLine();
+        }
+
         static void ShowHelp(OptionSet p)
         {
-            Console.WriteLine("Process Governor v{0} - allows you to set limits on your processes", 
-                Assembly.GetExecutingAssembly().GetName().Version.ToString());
-            Console.WriteLine("Copyright (C) 2016 Sebastian Solnica (@lowleveldesign)");
-            Console.WriteLine();
             Console.WriteLine("Usage: procgov [OPTIONS] args");
             Console.WriteLine();
             Console.WriteLine("Options:");
@@ -173,6 +221,28 @@ namespace LowLevelDesign
             Console.WriteLine();
             Console.WriteLine("Always run a test.exe process only on the first three CPU cores:");
             Console.WriteLine("> procgov --install --cpu 3 test.exe");
+            Console.WriteLine();
+        }
+
+        static void ShowLimits(ProcessGovernor procgov)
+        {
+            Console.WriteLine("CPU affinity mask:                      {0}", procgov.CpuAffinityMask != 0 ? 
+                $"0x{procgov.CpuAffinityMask:X}" : "(not set)");
+            Console.WriteLine("Maximum committed memory (MB):          {0}", procgov.MaxProcessMemory > 0 ?
+                $"{(procgov.MaxProcessMemory / 1048576):0,0}" : "(not set)");
+            Console.WriteLine("Process user-time execution limit (ms): {0}", procgov.ProcessUserTimeLimitInMilliseconds > 0 ?
+                $"{procgov.ProcessUserTimeLimitInMilliseconds:0,0}" : "(not set)");
+            Console.WriteLine("Job user-time execution limit (ms):     {0}", procgov.JobUserTimeLimitInMilliseconds > 0 ?
+                $"{procgov.JobUserTimeLimitInMilliseconds:0,0}" : "(not set)");
+            Console.WriteLine("Clock-time execution limit (ms):        {0}", procgov.ClockTimeLimitInMilliseconds > 0 ?
+                $"{procgov.ClockTimeLimitInMilliseconds:0,0}" : "(not set)");
+
+            if (procgov.PropagateOnChildProcesses) {
+                Console.WriteLine();
+                Console.WriteLine("All configured limits will also apply to the child processes.");
+            }
+            Console.WriteLine();
+            Console.WriteLine("Press Ctrl-C to end execution without terminating the process.");
             Console.WriteLine();
         }
 
@@ -203,7 +273,7 @@ namespace LowLevelDesign
         public static void SetupRegistryForProcessGovernor(ProcessGovernor procgov, string appImageExe, RegistryOperation oper)
         {
             if (!IsUserAdmin()) {
-                Console.WriteLine("You must be admin to do that. Run the app from the administrative console.");
+                Console.Error.WriteLine("You must be admin to do that. Run the app from the administrative console.");
                 return;
             }
             // extrace image.exe if path is provided
